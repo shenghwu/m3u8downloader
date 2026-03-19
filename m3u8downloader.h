@@ -10,8 +10,13 @@
 #include <QDir>
 #include <QPair>
 #include <QList>
+#include <QHash>
+#include <QMutex>
 
 #include <optional>
+
+class QThread;
+class QNetworkAccessManager;
 
 class EnhancedM3U8Downloader : public QObject
 {
@@ -72,12 +77,26 @@ private:
     // Helper to emit log signal
     void log(const QString &msg);
 
+    // Returns a QNetworkAccessManager local to the calling thread,
+    // creating one on first use. Reusing the manager across requests
+    // on the same thread enables HTTP keep-alive and avoids paying the
+    // TCP+TLS handshake cost on every segment (equivalent to requests.Session).
+    QNetworkAccessManager* getManagerForCurrentThread();
+
     int m_maxWorkers;
     int m_timeoutMs;
     int m_retryTimes;
     bool m_allowAlternateUrl;
 
     QList<QPair<QByteArray, QByteArray>> m_defaultHeaders;
+
+    // One QNAM per worker thread — QNAM is not thread-safe so it must
+    // not be shared across threads, but reusing within a thread is safe
+    // and avoids reconnecting for every segment.
+    QHash<QThread*, QNetworkAccessManager*> m_networkManagers;
+    QMutex m_managerMutex;
+
+    std::atomic<int> mCompletedCount;
 };
 
 #endif // ENHANCEDM3U8DOWNLOADER_H

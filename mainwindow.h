@@ -2,6 +2,7 @@
 #define MAINWINDOW_H
 
 #include <QMainWindow>
+#include <QElapsedTimer>
 #include "m3u8downloader.h"
 
 QT_BEGIN_NAMESPACE
@@ -18,6 +19,9 @@ public:
     MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
 
+protected:
+    QString downloadTime();
+
 private slots:
     void on_download_btn_clicked();
     // void onDownloadFinished(bool success);
@@ -31,5 +35,6 @@ private:
     Ui::MainWindow *ui;
     EnhancedM3U8Downloader *m_downloader;
     const QString STORED_PTH = "E:\tempVideoData";
+    QElapsedTimer m_downloadTimer;
 };
 #endif // MAINWINDOW_H

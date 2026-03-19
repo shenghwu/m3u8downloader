@@ -24,7 +24,7 @@ MainWindow::MainWindow(QWidget *parent)
     );
     setMinimumSize(500, 400);
 
-    m_downloader = new EnhancedM3U8Downloader(this);
+    // m_downloader = new EnhancedM3U8Downloader(this);
     ui->progressBar->setRange(0, 1);
     ui->progressBar->setValue(0);
     ui->progressBar->setFormat("准备中...");
@@ -55,6 +55,8 @@ void MainWindow::on_download_btn_clicked()
 
     ui->download_btn->setEnabled(false);
     ui->statusbar->showMessage("Parsing m3u8 file...", 2000);
+    m_downloadTimer.start();
+
 
     // Create the downloader instance
     // Note: Better to have this as a member variable if you want to reuse it or cancel it
@@ -79,11 +81,14 @@ void MainWindow::on_download_btn_clicked()
     connect(downloader, &EnhancedM3U8Downloader::downloadFinished, this, [this, downloader](bool success, const QString &msg){
         qDebug() << "Finished:" << msg;
         ui->download_btn->setEnabled(true);
+        QString timeStr = downloadTime();
         if (success) {
             ui->progressBar->setFormat("下载完成");
+            statusBar()->showMessage(QString("下载完成，耗时：%1").arg(timeStr), 3000);
             QMessageBox::information(this, "完成", "视频下载完成！");
         } else {
             ui->progressBar->setFormat("下载失败");
+            statusBar()->showMessage(QString("下载失败，耗时：%1").arg(timeStr), 3000);
             QMessageBox::critical(this, "错误", msg);
         }
 
@@ -93,6 +98,23 @@ void MainWindow::on_download_btn_clicked()
 
     // Start!
     downloader->startDownload(QUrl(urlStr), outputPath);
+}
+
+QString MainWindow::downloadTime()
+{
+    QString timeStr;
+    qint64 elapsedMs = m_downloadTimer.elapsed();
+    int seconds = (elapsedMs / 1000) % 60;
+    int minutes = (elapsedMs / (1000 * 60)) % 60;
+    int hours = (elapsedMs / (1000 * 60 * 60));
+    if (hours > 0) {
+        timeStr = QString("%1h%2m%3s").arg(hours).arg(minutes).arg(seconds);
+    } else if (minutes > 0) {
+        timeStr = QString("%1m%2s").arg(minutes).arg(seconds);
+    } else {
+        timeStr = QString("%1.%2s").arg(seconds).arg((elapsedMs % 1000) / 100);
+    }
+    return timeStr;
 }
 
 void MainWindow::onDownloadFinished()

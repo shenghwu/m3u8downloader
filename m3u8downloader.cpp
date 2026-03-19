@@ -141,10 +141,10 @@ bool EnhancedM3U8Downloader::downloadFromUrl(const QUrl &url, const QString &out
     const QUrl primaryUrl(m3u8Urls.first());
     if (downloadM3U8(primaryUrl, outputFile))
     {
-        if (!m_allowAlternateUrl)
-        {
-            m_allowAlternateUrl = true;
-        }
+        // if (!m_allowAlternateUrl)
+        // {
+        //     m_allowAlternateUrl = true;
+        // }
         return true;
     }
 
@@ -449,6 +449,28 @@ QStringList EnhancedM3U8Downloader::extractM3U8FromPage(const QUrl &pageUrl)
     return QStringList(unique.begin(), unique.end());
 }
 
+QNetworkAccessManager* EnhancedM3U8Downloader::getManagerForCurrentThread()
+{
+    QThread *thread = QThread::currentThread();
+    QMutexLocker lock(&m_managerMutex);
+    auto it = m_networkManagers.find(thread);
+    if (it == m_networkManagers.end())
+    {
+        auto *mgr = new QNetworkAccessManager();
+        m_networkManagers.insert(thread, mgr);
+        // Remove the entry when the thread exits so the hash doesn't grow
+        // unboundedly. The QNAM itself is deleted by Qt (no parent, but we
+        // call deleteLater via the finished connection).
+        QObject::connect(thread, &QThread::finished, mgr, &QObject::deleteLater);
+        QObject::connect(thread, &QThread::finished, this, [this, thread]() {
+            QMutexLocker l(&m_managerMutex);
+            m_networkManagers.remove(thread);
+        });
+        return mgr;
+    }
+    return it.value();
+}
+
 QByteArray EnhancedM3U8Downloader::downloadText(const QUrl &url)
 {
     return downloadBinary(url);
@@ -461,10 +483,15 @@ QByteArray EnhancedM3U8Downloader::downloadBinary(const QUrl &url)
         return {};
     }
 
+    // Reuse the per-thread QNAM so HTTP keep-alive connections are preserved
+    // across calls on the same thread, avoiding a full TCP+TLS handshake for
+    // every segment (mirrors what requests.Session does in the Python version).
+    QNetworkAccessManager *manager = getManagerForCurrentThread();
+
     for (int attempt = 0; attempt < m_retryTimes; ++attempt)
     {
         // Must create QNAM in the current thread (which is likely a worker thread)
-        auto manager = std::make_unique<QNetworkAccessManager>();
+        // auto manager = std::make_unique<QNetworkAccessManager>();
         QNetworkRequest request(url);
         request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         for (const auto &header : m_defaultHeaders)
@@ -508,7 +535,7 @@ QByteArray EnhancedM3U8Downloader::downloadBinary(const QUrl &url)
         }
 
         delete reply;
-        manager.reset();
+        // manager.reset();
 
         if (success && !data.isEmpty())
         {
@@ -562,9 +589,19 @@ QVector<QString> EnhancedM3U8Downloader::downloadTsSegments(const QVector<QUrl> 
     const QByteArray effectiveIv = iv.has_value() ? normalizeIv(iv.value()) : QByteArray();
     
     // We need to know who to notify
-    auto notifier = [this, total = urls.size()](int current) {
-         emit downloadProgress(current, total);
-    };
+    // auto notifier = [this, total = urls.size()](int current) {
+    //      emit downloadProgress(current, total);
+    // };
+
+    // Atomic counter so each worker emits progress exactly once when it finishes,
+    // giving a smooth +1 increment in the UI regardless of segment completion order.
+    // (The old approach called notifier() from the ordered collection loop, which
+    // caused bursts: if segments 1-25 finished while waiting on segment 0, they
+    // all fired in rapid succession the moment segment 0 unblocked.)
+    // std::atomic<int> completedCount{0};
+    mCompletedCount = 0;
+    const int totalCount = urls.size();
+    // const int totalCount = static_cast<int>(urls.size());
 
     QThreadPool pool;
     pool.setMaxThreadCount(std::max(1, m_maxWorkers));
@@ -578,7 +615,7 @@ QVector<QString> EnhancedM3U8Downloader::downloadTsSegments(const QVector<QUrl> 
         const QUrl segmentUrl = urls.at(i);
         const QString filePath = tempDir.filePath(QStringLiteral("segment_%1.ts").arg(i, 5, 10, QChar('0')));
 
-        futures.append(QtConcurrent::run(&pool, [this, i, segmentUrl, filePath, effectiveKey, effectiveIv]() -> SegmentResult {
+        futures.append(QtConcurrent::run(&pool, [this, i, segmentUrl, filePath, effectiveKey, effectiveIv,  totalCount]() -> SegmentResult {
             SegmentResult result;
             result.index = i;
             result.filePath = filePath;
@@ -587,6 +624,8 @@ QVector<QString> EnhancedM3U8Downloader::downloadTsSegments(const QVector<QUrl> 
             if (existing.exists() && existing.size() > 0)
             {
                 result.success = true;
+                qDebug() << "Emitting progress for segment" << i << "count =" << (mCompletedCount.load() + 1);
+                emit downloadProgress(mCompletedCount.fetch_add(1) + 1, totalCount);
                 return result;
             }
 
@@ -617,12 +656,15 @@ QVector<QString> EnhancedM3U8Downloader::downloadTsSegments(const QVector<QUrl> 
             file.close();
 
             result.success = true;
+            qDebug() << "Emitting progress (new) for segment" << i << "count =" << (mCompletedCount.load() + 1);
+            emit downloadProgress(mCompletedCount.fetch_add(1) + 1, totalCount);
             return result;
         }));
     }
 
     QVector<QString> files(urls.size());
-    int completed = 0;
+    // int completed = 0;
+    int failed=0;
 
     // Wait and collect results
     for (QFuture<SegmentResult> &future : futures)
@@ -632,18 +674,21 @@ QVector<QString> EnhancedM3U8Downloader::downloadTsSegments(const QVector<QUrl> 
         if (result.success && result.index >= 0 && result.index < files.size())
         {
             files[result.index] = result.filePath;
-            ++completed;
-            notifier(completed);
+            // ++completed;
+            // notifier(completed);
         }
         else
         {
             log(QString("Failed segment index: %1").arg(result.index));
+            ++failed;
         }
     }
 
-    if (completed != urls.size())
+    // if (completed != urls.size())
+    if (failed > 0)
     {
-        log(QString("Download failed. incomplete segments: %1").arg(urls.size() - completed));
+        // log(QString("Download failed. incomplete segments: %1").arg(urls.size() - completed));
+        log(QString("Download failed. incomplete segments: %1").arg(failed));
         return {};
     }
 
